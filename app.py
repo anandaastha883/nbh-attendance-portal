@@ -8,7 +8,7 @@ import xlsxwriter
 from fpdf import FPDF
 from datetime import datetime, timedelta
 
-# --- 1. SETTINGS & CSS ---
+# --- 1. CONFIG & SYSTEM CSS ---
 st.set_page_config(page_title="NBH Workforce Enterprise", layout="wide")
 
 st.markdown("""
@@ -28,6 +28,8 @@ st.markdown("""
     .nbh-shift-footer { position: absolute; bottom: 8px; font-size: 9px; color: #999; text-align: center; width: 100%; }
     .nbh-off-label { margin: auto; font-size: 10px; color: #aaa; font-weight: bold; text-align: center; }
     .manpower-card { background-color: #ffffff; padding: 20px; border-radius: 12px; border: 1px solid #e0e0e0; border-left: 6px solid #5D5FEF; margin-bottom: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .manpower-label { font-size: 13px; font-weight: 600; color: #888; text-transform: uppercase; }
+    .manpower-value { font-size: 24px; font-weight: 700; color: #1B2132; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -58,6 +60,8 @@ def generate_master_excel(full_data, pay_df, month):
         fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
         for sn in ['Payroll_Summary', 'Detailed_Logs']:
             ws = writer.sheets[sn]; ws.set_column('A:Z', 18)
+            current_cols = pay_df.columns if sn == 'Payroll_Summary' else full_data.columns
+            for i, col in enumerate(current_cols): ws.write(0, i, col, fmt)
     return output.getvalue()
 
 def generate_slip_pdf(soc, month, name, p_df, net_val):
@@ -71,7 +75,7 @@ def generate_slip_pdf(soc, month, name, p_df, net_val):
         pdf.cell(w[0], 10, str(r['Date']), 1); pdf.cell(w[1], 10, str(r['Status']), 1); pdf.cell(w[2], 10, format_pretty_time(r['Worked_Hrs']), 1); pdf.ln()
     return bytes(pdf.output())
 
-# --- 4. AUTH ---
+# --- 4. AUTH & SESSION ---
 if 'auth' not in st.session_state: st.session_state.auth = {'logged_in': False}
 
 def login_logic(email, password, required_role):
@@ -80,50 +84,56 @@ def login_logic(email, password, required_role):
         if user.iloc[0]['role'] == required_role:
             st.session_state.auth = {'logged_in': True, 'user': email, 'name': user.iloc[0]['society_name'], 'role': user.iloc[0]['role']}
             st.session_state.pop('processed_data', None); return True
+    st.error(f"❌ Invalid Credentials for {required_role} access.")
     return False
 
 if not st.session_state.auth['logged_in']:
-    st.title("🏢 NoBrokerHood Admin Portal")
-    t_m, t_a = st.tabs(["🏠 Society Manager", "🔑 NBH System Admin"])
+    st.title("🏢 NoBrokerHood Enterprise Management")
+    t_m, t_a = st.tabs(["🏠 Society Manager Login", "🔑 NBH System Admin Access"])
     with t_m:
         with st.form("m_login"):
             me = st.text_input("Society Email"); mp = st.text_input("Password", type="password")
-            if st.form_submit_button("Manager Access"):
+            if st.form_submit_button("Manager Login"):
                 if login_logic(me, mp, 'manager'): st.rerun()
     with t_a:
         with st.form("a_login"):
             ae = st.text_input("Admin Username"); ap = st.text_input("Admin Password", type="password")
-            if st.form_submit_button("Admin Access"):
+            if st.form_submit_button("Admin Login"):
                 if login_logic(ae, ap, 'super_admin'): st.rerun()
 else:
     u_email, u_name, u_role = st.session_state.auth['user'], st.session_state.auth['name'], st.session_state.auth['role']
     st.sidebar.title(f"👋 {u_name}")
     if st.sidebar.button("Logout"): st.session_state.auth = {'logged_in': False}; st.rerun()
 
-    # --- IF SYSTEM ADMIN ---
+    # --- IF ADMIN VIEW (CRUD FIXED) ---
     if u_role == 'super_admin':
-        st.header("🔑 Master Admin Console")
-        conn = get_db(); all_socs = pd.read_sql("SELECT society_name as 'Society', email as 'Account' FROM users WHERE role='manager'", conn)
+        st.header("🔑 Master Administration Dashboard")
+        conn = get_db(); all_socs = pd.read_sql("SELECT society_name as 'Society', email as 'Account_ID' FROM users WHERE role='manager'", conn)
         st.dataframe(all_socs, use_container_width=True)
-        
+
         c1, c2 = st.columns(2)
         with c1:
-            with st.form("add_new"):
-                st.subheader("➕ Add Society")
-                n, e, p = st.text_input("Name"), st.text_input("Email"), st.text_input("Password")
-                if st.form_submit_button("Register"):
-                    try: conn.execute("INSERT INTO users (email,password,society_name,role) VALUES (?,?,?,?)",(e,make_hash(p),n,'manager')); conn.commit(); st.rerun()
+            with st.form("add_form"): # FORM START
+                st.subheader("➕ Register New Society")
+                n = st.text_input("Name"); e = st.text_input("Email"); p = st.text_input("Password")
+                if st.form_submit_button("Create Society Account"):
+                    try: 
+                        conn.execute("INSERT INTO users (email,password,society_name,role) VALUES (?,?,?,?)",(e,make_hash(p),n,'manager'))
+                        conn.commit(); st.success("Created!"); st.rerun()
                     except: st.error("Email exists.")
+        
         with c2:
-            with st.form("del_soc"):
+            with st.form("del_form"): # FORM START
                 st.subheader("🗑️ Delete Society")
-                target = st.selectbox("Select Account", ["Select..."] + all_socs['Account'].tolist())
-                if st.form_submit_button("Permanently Remove"):
-                    if target != "Select...":
-                        conn.execute("DELETE FROM users WHERE email=?", (target,)); conn.execute("DELETE FROM rosters WHERE society_email=?", (target,)); conn.commit(); st.rerun()
+                target_del = st.selectbox("Select Society", ["Select..."] + all_socs['Account_ID'].tolist())
+                if st.form_submit_button("Delete Account"): # FIXED: Now inside the form
+                    if target_del != "Select...":
+                        conn.execute("DELETE FROM users WHERE email=?", (target_del,))
+                        conn.execute("DELETE FROM rosters WHERE society_email=?", (target_del,))
+                        conn.commit(); st.warning("Deleted."); st.rerun()
         conn.close()
 
-    # --- IF MANAGER ---
+    # --- IF MANAGER VIEW ---
     else:
         page = st.sidebar.radio("Navigate", ["🚀 Dashboard", "💰 Payroll Hub", "👥 Employee Configuration", "📅 Holiday Planner"])
 
@@ -137,26 +147,21 @@ else:
                 cols = st.columns(7)
                 for i, day in enumerate(week):
                     if day != 0:
-                        d_str = f"{y}-{list(calendar.month_name).index(m_name)+1:02d}-{day:02d}"
+                        d_str = f"{y}-{list(calendar.month_name).index(m_name):02d}-{day:02d}"
                         if cols[i].checkbox(f"{day} ({weekdays[i]})", value=d_str in saved, key=f"hp_{d_str}"): new_selections.append(d_str)
-            if st.button("💾 Save Holiday Calendar"):
-                other = [h for h in saved if not h.startswith(f"{y}-{list(calendar.month_name).index(m_name)+1:02d}")]; conn = get_db(); conn.execute('UPDATE users SET holidays=? WHERE email=?', (",".join(list(set(other + new_selections))), u_email)); conn.commit(); conn.close(); st.success("Updated!")
+            if st.button("💾 Save Holidays"):
+                other = [h for h in saved if not h.startswith(f"{y}-{list(calendar.month_name).index(m_name):02d}")]; conn = get_db(); conn.execute('UPDATE users SET holidays=? WHERE email=?', (",".join(list(set(other + new_selections))), u_email)); conn.commit(); conn.close(); st.success("Updated!")
 
         elif page == "👥 Employee Configuration":
-            st.header("Individual Roster & Financial Setup")
+            st.header("Personnel & Financial Setup")
             conn = get_db(); cats_df = pd.read_sql(f"SELECT DISTINCT category FROM rosters WHERE society_email='{u_email}'", conn); cat_list = ["All"] + cats_df['category'].tolist()
-            sel_cat = st.selectbox("Filter by Category", cat_list)
+            sel_cat_conf = st.selectbox("Filter by Category", cat_list)
             query = f"SELECT employee_name as 'Name', category as 'Department', pay_type as 'Salary Type', base_salary as 'Base Pay', ot_rate as 'OT Rate', late_penalty as 'Late Fee', absent_penalty as 'Absent Fee', shift_start as 'Start Time', shift_hours as 'Shift Hours', week_off as 'Mandatory Week Off' FROM rosters WHERE society_email='{u_email}'"
-            if sel_cat != "All": query += f" AND category = '{sel_cat}'"
+            if sel_cat_conf != "All": query += f" AND category = '{sel_cat_conf}'"
             df = pd.read_sql(query, conn); conn.close()
             if not df.empty:
-                # Drodowns Restored
                 ed = st.data_editor(df, use_container_width=True, key="config_ed", 
-                                    column_config={
-                                        "Salary Type": st.column_config.SelectboxColumn(options=["Monthly", "Daily"]),
-                                        "Mandatory Week Off": st.column_config.SelectboxColumn(options=["None", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]),
-                                        "Base Pay": st.column_config.NumberColumn(format="₹%d")
-                                    }, disabled=["Department"])
+                                    column_config={"Salary Type": st.column_config.SelectboxColumn(options=["Monthly", "Daily"]), "Mandatory Week Off": st.column_config.SelectboxColumn(options=["None", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])}, disabled=["Department"])
                 if st.button("💾 Save Changes"):
                     conn = get_db()
                     for _, r in ed.iterrows(): conn.execute('''UPDATE rosters SET shift_hours=?, week_off=?, shift_start=?, base_salary=?, pay_type=?, ot_rate=?, late_penalty=?, absent_penalty=? WHERE employee_name=? AND society_email=?''', (r['Shift Hours'], r['Mandatory Week Off'], r['Start Time'], r['Base Pay'], r['Salary Type'], r['OT Rate'], r['Late Fee'], r['Absent Fee'], r['Name'], u_email))
@@ -166,7 +171,7 @@ else:
             st.header("💰 Society Payroll Hub")
             if 'processed_data' not in st.session_state: st.warning("Process data in Dashboard first.")
             else:
-                data = st.session_state.processed_data; sel_m = st.selectbox("Month", data['Month'].unique()); m_data = data[data['Month'] == sel_m]
+                data = st.session_state.processed_data; sel_m = st.selectbox("Payroll Month", data['Month'].unique()); m_data = data[data['Month'] == sel_m]
                 conn = get_db(); rost = pd.read_sql(f"SELECT * FROM rosters WHERE society_email='{u_email}'", conn).set_index('employee_name'); conn.close()
                 pay_rows = []
                 for n in m_data['Name'].unique():
@@ -174,14 +179,14 @@ else:
                     e_df = m_data[m_data['Name'] == n]; r = rost.loc[n]
                     p, h, w, hl, l, ab = len(e_df[e_df['Status'] == 'Present']), len(e_df[e_df['Status'] == 'Half Day']), len(e_df[e_df['Status'] == 'Weekly Off']), len(e_df[e_df['Status'] == 'Holiday']), len(e_df[e_df['Punctuality'] == 'Late']), len(e_df[e_df['Status'] == 'Absent'])
                     ot_p = round(e_df['OT_Hrs'].sum() * r['ot_rate'], 2); pens = (l * r['late_penalty']) + (ab * r['absent_penalty'])
-                    base = round((r['base_salary'] / 30) * (p + w + hl + (h * r['half_day_rule'])), 2) if r['pay_type'] == "Monthly" else round(r['base_salary'] * (p + (h * 0.5)), 2)
-                    pay_rows.append({"Employee Name": n, "Salary Type": r['pay_type'], "Base Earned": base, "OT Pay": ot_p, "Total Fees": pens, "Final Net Payable": round(base + ot_p + r['bonus'] - pens, 2)})
+                    if r['pay_type'] == "Monthly": base = round((r['base_salary'] / 30) * (p + w + hl + (h * 0.5)), 2)
+                    else: base = round(r['base_salary'] * (p + (h * 0.5)), 2)
+                    pay_rows.append({"Employee Name": n, "Salary Type": r['pay_type'], "Base Earned": base, "OT Pay": ot_p, "Total Deductions": pens, "Final Net Payable": round(base + ot_p + r['bonus'] - pens, 2)})
                 pay_df = pd.DataFrame(pay_rows); st.dataframe(pay_df, use_container_width=True, hide_index=True)
-                col1, col2 = st.columns(2)
-                col1.download_button("📥 Master Excel Report", generate_master_excel(m_data, pay_df, sel_m), f"Payroll_{sel_m}.xlsx")
-                worker = st.selectbox("Worker PDF Slip", pay_df['Employee Name'].unique())
+                col1, col2 = st.columns(2); col1.download_button("📥 Master Excel Report", generate_master_excel(m_data, pay_df, sel_m), f"Payroll_{sel_m}.xlsx")
+                worker = st.selectbox("Individual PDF Slip", pay_df['Employee Name'].unique())
                 net = pay_df[pay_df['Employee Name']==worker]['Final Net Payable'].iloc[0]
-                st.download_button(f"📄 Download PDF Slip for {worker}", generate_slip_pdf(u_name, sel_m, worker, m_data[m_data['Name']==worker], net), f"Slip_{worker}.pdf", "application/pdf")
+                st.download_button(f"📄 Download Slip for {worker}", generate_slip_pdf(u_name, sel_m, worker, m_data[m_data['Name']==worker], net), f"Slip_{worker}.pdf", "application/pdf")
 
         elif page == "🚀 Dashboard":
             st.header("Attendance Dashboard")
@@ -193,23 +198,22 @@ else:
                     if not conn.execute('SELECT 1 FROM rosters WHERE employee_name=? AND society_email=?', (row['Name'], u_email)).fetchone():
                         conn.execute('INSERT INTO rosters (society_email, employee_name, category) VALUES (?,?,?)', (u_email, row['Name'], row['Type']))
                 conn.commit(); conn.close()
-                if st.button("🚀 Run Analysis"):
+                if st.button("🚀 Process Data"):
                     conn = get_db(); rost_dict = pd.read_sql(f"SELECT * FROM rosters WHERE society_email='{u_email}'", conn).set_index('employee_name').to_dict('index')
                     u_info = pd.read_sql(f"SELECT holidays FROM users WHERE email='{u_email}'", conn).iloc[0]; conn.close(); hols = [h.strip() for h in u_info['holidays'].split(",") if h.strip()]
                     date_cols = [col.split(' ')[0] for col in df_raw.columns if 'Duration' in col]
                     rows = []
                     for _, row in df_raw.iterrows():
-                        name = row['Name']; emp = rost_dict.get(name, {'shift_hours': 8.0, 'week_off': 'Sunday', 'shift_start': '09:00 AM', 'category': 'General'})
+                        name = row['Name']; emp = rost_dict.get(name, {'shift_hours': 8.0, 'week_off': 'Sunday', 'shift_start': '09:00 AM'})
                         for d in date_cols:
                             h_val = time_to_decimal(row.get(f"{d} Duration", 0)); in_t = str(row.get(f"{d} Check In", "00:00")); out_t = str(row.get(f"{d} Check Out", "00:00"))
-                            dt = pd.to_datetime(d)
-                            # --- WEEKLY OFF PROTECTION ---
-                            is_off = (dt.strftime('%A').strip().lower() == str(emp['week_off']).strip().lower())
+                            dt = pd.to_datetime(d); is_off = (dt.strftime('%A').strip().lower() == str(emp['week_off']).strip().lower())
                             if is_off: s = "Weekly Off"
                             elif d in hols: s = "Holiday"
                             elif h_val >= emp['shift_hours']: s = "Present"
                             elif h_val >= (emp['shift_hours']/2): s = "Half Day"
                             else: s = "Absent"
+                            
                             is_late = "On-Time"
                             try:
                                 act = datetime.strptime(in_t, "%I:%M %p") if " " in in_t else datetime.strptime(in_t, "%H:%M")
@@ -220,17 +224,19 @@ else:
                     st.session_state.processed_data = pd.DataFrame(rows)
 
             if 'processed_data' in st.session_state:
-                data = st.session_state.processed_data; sel_m = st.selectbox("View Month", data['Month'].unique()); m_data = data[data['Month'] == sel_m]
-                # Live Manpower Cards
-                st.subheader("📡 Live Manpower Summary (Today)")
-                latest = m_data['Date'].max(); today_df = m_data[m_data['Date'] == latest]
+                data = st.session_state.processed_data
+                latest_date = data['Date'].max(); today_df = data[data['Date'] == latest_date]
                 conn = get_db(); rost_cnts = pd.read_sql(f"SELECT category, COUNT(*) as total FROM rosters WHERE society_email='{u_email}' GROUP BY category", conn); conn.close()
+                st.subheader("📡 Live Manpower Summary")
                 m_cols = st.columns(max(len(rost_cnts), 1))
                 for i, (_, r_cnt) in enumerate(rost_cnts.iterrows()):
                     pres = len(today_df[(today_df['Category'] == r_cnt['category']) & (today_df['Status'] == 'Present')])
                     m_cols[i].markdown(f"<div class='manpower-card'><div class='manpower-label'>{r_cnt['category']}</div><div class='manpower-value'>{pres} / {r_cnt['total']} Present</div></div>", unsafe_allow_html=True)
-
-                st.subheader("📊 Society Overview"); st.dataframe(m_data.groupby(['Name', 'Category', 'Status']).size().unstack(fill_value=0).reset_index(), use_container_width=True)
+                
+                col_m, col_c = st.columns(2); sel_m = col_m.selectbox("Month View", data['Month'].unique()); sel_cat = col_c.selectbox("Filter Category", ["All"] + data['Category'].unique().tolist())
+                m_data = data[data['Month'] == sel_m]
+                if sel_cat != "All": m_data = m_data[m_data['Category'] == sel_cat]
+                st.subheader("📊 Society Summary Table"); st.dataframe(m_data.groupby(['Name', 'Category', 'Status']).size().unstack(fill_value=0).reset_index(), use_container_width=True)
                 sel_n = st.selectbox("Individual Calendar Spotlight", m_data['Name'].unique()); p_df = m_data[m_data['Name'] == sel_n].sort_values('Date')
                 html = ["<div class='nbh-cal-container'>"]
                 for d in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]: html.append(f"<div class='nbh-cal-header'>{d}</div>")
