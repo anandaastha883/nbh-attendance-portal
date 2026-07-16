@@ -51,9 +51,10 @@ st.markdown("""
     .nbh-today-circle { background-color: #5D5FEF; color: white !important; border-radius: 50%; padding: 2px 7px; }
 
     .nbh-status-icon { font-size: 20px; display: block; margin-top: 5px; }
-    .nbh-status-label { font-size: 10px; font-weight: 800; text-transform: uppercase; color: #444; margin-top: 2px; }
-    .nbh-time-text { font-size: 11px; font-weight: 800; color: #1B2132; margin-top: 5px; }
-    .nbh-shift-footer { margin-top: auto; padding-top: 5px; border-top: 1px solid #f0f0f0; font-size: 9px; color: #999; text-align: center; width: 100%; }
+    .nbh-status-box { display: flex; flex-direction: column; align-items: center; }
+    .nbh-status-label { font-size: 10px; font-weight: 800; text-transform: uppercase; color: #444; margin-top: 6px; letter-spacing: 0.5px; }
+    .nbh-time-text { font-size: 13px; font-weight: 700; color: #1B2132; margin-top: 4px; background-color: #f0f1fd; padding: 2px 10px; border-radius: 10px; display: inline-block; }
+    .nbh-shift-footer { margin-top: auto; padding-top: 6px; border-top: 1px solid #f0f0f0; font-size: 10px; color: #888; text-align: center; width: 100%; }
     .nbh-off-label { margin: auto; font-size: 10px; color: #aaa; font-weight: bold; }
 
     /* 3. MANPOWER CARDS */
@@ -89,10 +90,87 @@ def generate_master_excel(full_data, pay_df, month):
         for sn in writer.sheets: writer.sheets[sn].set_column('A:Z', 18)
     return output.getvalue()
 
-def generate_slip_pdf(soc, month, name, p_df, net_val):
-    pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", "B", 16); pdf.cell(190, 10, f"{soc}", 0, 1, "C")
-    pdf.set_font("Arial", "", 12); pdf.cell(190, 10, f"Salary Slip: {month}", 0, 1, "C"); pdf.ln(10)
-    pdf.set_font("Arial", "B", 10); pdf.cell(190, 10, f"Name: {name} | Net Payable: Rs. {net_val}", 1, 1); pdf.ln(10)
+def generate_slip_pdf(soc, month, name, emp_info, pay, p_df):
+    pdf = FPDF(); pdf.add_page()
+    pdf.set_font("Arial", "B", 16); pdf.cell(190, 10, f"{soc}", 0, 1, "C")
+    pdf.set_font("Arial", "", 12); pdf.cell(190, 8, f"Salary Slip - {month}", 0, 1, "C")
+    pdf.ln(2); pdf.set_draw_color(200, 200, 200); pdf.line(10, pdf.get_y(), 200, pdf.get_y()); pdf.ln(6)
+
+    # Employee info
+    pdf.set_font("Arial", "B", 11)
+    pdf.cell(95, 8, f"Employee Name: {name}", 0, 0)
+    pdf.cell(95, 8, f"Department: {emp_info.get('category', '-')}", 0, 1)
+    pdf.cell(95, 8, f"Salary Type: {emp_info.get('pay_type', '-')}", 0, 0)
+    pdf.cell(95, 8, f"Weekly Off: {emp_info.get('week_off', '-')}", 0, 1)
+    pdf.ln(4)
+
+    # Attendance summary
+    pdf.set_fill_color(93, 95, 239); pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Arial", "B", 11); pdf.cell(190, 8, "Attendance Summary", 0, 1, "L", True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", "", 10)
+    att_rows = [
+        ("Present Days", pay['Present']), ("Absent Days", pay['Absent']),
+        ("Half Days", pay['Half Day']), ("Holidays", pay['Holiday']),
+        ("Weekly Offs", pay['Weekly Off']), ("Late Arrivals", pay['Late Days']),
+        ("Total OT Hours", f"{pay['OT Hours']:.2f}"),
+    ]
+    for i in range(0, len(att_rows), 2):
+        left = att_rows[i]
+        pdf.set_font("Arial", "B", 10); pdf.cell(45, 7, f"{left[0]}:", 0, 0)
+        pdf.set_font("Arial", "", 10); pdf.cell(50, 7, str(left[1]), 0, 0)
+        if i + 1 < len(att_rows):
+            right = att_rows[i + 1]
+            pdf.set_font("Arial", "B", 10); pdf.cell(45, 7, f"{right[0]}:", 0, 0)
+            pdf.set_font("Arial", "", 10); pdf.cell(50, 7, str(right[1]), 0, 1)
+        else:
+            pdf.ln(7)
+    pdf.ln(4)
+
+    # Earnings & Deductions
+    pdf.set_fill_color(93, 95, 239); pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Arial", "B", 11)
+    pdf.cell(95, 8, "Earnings", 0, 0, "L", True); pdf.cell(95, 8, "Deductions", 0, 1, "L", True)
+    pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", "", 10)
+    earnings = [("Base Earned", pay['Base Earned']), ("OT Pay", pay['OT Pay']), ("Bonus", pay['Bonus'])]
+    deductions = [("Late Fee", pay['Late Fee Total']), ("Absent Fee", pay['Absent Fee Total'])]
+    for i in range(max(len(earnings), len(deductions))):
+        if i < len(earnings):
+            pdf.cell(55, 7, earnings[i][0], 0, 0); pdf.cell(40, 7, f"Rs. {earnings[i][1]:,.2f}", 0, 0)
+        else:
+            pdf.cell(95, 7, "", 0, 0)
+        if i < len(deductions):
+            pdf.cell(55, 7, deductions[i][0], 0, 0); pdf.cell(40, 7, f"Rs. {deductions[i][1]:,.2f}", 0, 1)
+        else:
+            pdf.cell(95, 7, "", 0, 1)
+    pdf.ln(4)
+
+    # Net payable
+    pdf.set_fill_color(46, 125, 50); pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(190, 12, f"Net Payable: Rs. {pay['Final Net Payable']:,.2f}", 1, 1, "C", True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(6)
+
+    # Daily attendance log
+    pdf.set_font("Arial", "B", 11); pdf.cell(190, 8, "Daily Attendance Log", 0, 1)
+    pdf.set_font("Arial", "B", 9); pdf.set_fill_color(240, 240, 240)
+    headers = ["Date", "Status", "In", "Out", "Hrs"]; widths = [35, 45, 35, 35, 30]
+    for hdr, w in zip(headers, widths): pdf.cell(w, 7, hdr, 1, 0, "C", True)
+    pdf.ln()
+    pdf.set_font("Arial", "", 8)
+    for _, r in p_df.sort_values('Date').iterrows():
+        if pdf.get_y() > 270:
+            pdf.add_page()
+            pdf.set_font("Arial", "B", 9); pdf.set_fill_color(240, 240, 240)
+            for hdr, w in zip(headers, widths): pdf.cell(w, 7, hdr, 1, 0, "C", True)
+            pdf.ln(); pdf.set_font("Arial", "", 8)
+        pdf.cell(35, 6, str(r['Date']), 1)
+        pdf.cell(45, 6, str(r['Status']), 1)
+        pdf.cell(35, 6, str(r['In']), 1)
+        pdf.cell(35, 6, str(r['Out']), 1)
+        pdf.cell(30, 6, f"{r['Worked_Hrs']:.2f}" if r['Worked_Hrs'] else "-", 1)
+        pdf.ln()
+
     return bytes(pdf.output())
 
 # --- 3. AUTH & SESSION ---
@@ -225,14 +303,27 @@ else:
                     if n not in rost.index: continue
                     e_df = m_data[m_data['Name'] == n]; r = rost.loc[n]
                     p, h, w, hl, l, ab = len(e_df[e_df['Status'] == 'Present']), len(e_df[e_df['Status'] == 'Half Day']), len(e_df[e_df['Status'] == 'Weekly Off']), len(e_df[e_df['Status'] == 'Holiday']), len(e_df[e_df['Punctuality'] == 'Late']), len(e_df[e_df['Status'] == 'Absent'])
-                    ot_p = round(e_df['OT_Hrs'].sum() * r['ot_rate'], 2); pens = (l * r['late_penalty']) + (ab * r['absent_penalty'])
+                    ot_hrs = round(e_df['OT_Hrs'].sum(), 2); ot_p = round(ot_hrs * r['ot_rate'], 2)
+                    late_fee = round(l * r['late_penalty'], 2); absent_fee = round(ab * r['absent_penalty'], 2); pens = late_fee + absent_fee
                     if r['pay_type'] == "Monthly": base = round((r['base_salary'] / 30) * (p + w + hl + (h * r['half_day_rule'])), 2)
                     else: base = round(r['base_salary'] * (p + (h * r['half_day_rule'])), 2)
-                    pay_rows.append({"Employee Name": n, "Salary Type": r['pay_type'], "Base Earned": base, "OT Pay": ot_p, "Total Fees": pens, "Final Net Payable": round(base + ot_p + r['bonus'] - pens, 2)})
+                    pay_rows.append({
+                        "Employee Name": n, "Salary Type": r['pay_type'],
+                        "Present": p, "Absent": ab, "Half Day": h, "Holiday": hl, "Weekly Off": w, "Late Days": l,
+                        "OT Hours": ot_hrs, "Base Earned": base, "OT Pay": ot_p, "Bonus": round(r['bonus'], 2),
+                        "Late Fee Total": late_fee, "Absent Fee Total": absent_fee, "Total Fees": pens,
+                        "Final Net Payable": round(base + ot_p + r['bonus'] - pens, 2)
+                    })
                 pay_df = pd.DataFrame(pay_rows); st.dataframe(pay_df, use_container_width=True)
                 col1, col2 = st.columns(2); col1.download_button("📥 Master Excel", generate_master_excel(m_data, pay_df, sel_m), f"Payroll_{sel_m}.xlsx")
-                worker = st.selectbox("Worker Slip (PDF)", pay_df['Employee Name'].unique()); net = pay_df[pay_df['Employee Name']==worker]['Final Net Payable'].iloc[0]
-                st.download_button(f"📄 Download PDF for {worker}", generate_slip_pdf(u_name, sel_m, worker, m_data[m_data['Name']==worker], net), f"Slip_{worker}.pdf", "application/pdf")
+                worker = st.selectbox("Worker Slip (PDF)", pay_df['Employee Name'].unique())
+                worker_pay = pay_df[pay_df['Employee Name'] == worker].iloc[0]
+                worker_info = rost.loc[worker]
+                st.download_button(
+                    f"📄 Download PDF for {worker}",
+                    generate_slip_pdf(u_name, sel_m, worker, worker_info, worker_pay, m_data[m_data['Name'] == worker]),
+                    f"Slip_{worker}.pdf", "application/pdf"
+                )
 
         elif page == "🚀 Attendance Dashboard":
             st.header("Attendance Dashboard")
@@ -289,5 +380,8 @@ else:
                     is_off = "nbh-weekly-off" if r['Status'] == "Weekly Off" else ""; icon, label, color = mapping.get(r['Status'], ("❓", "??", "#000"))
                     t_info = f"<span class='nbh-time-text'>{format_pretty_time(r['Worked_Hrs'])}</span>" if r['Worked_Hrs'] > 0 else ""
                     body = f"<div class='nbh-off-label'>{icon} {label}</div>{t_info}" if r['Status'] == "Weekly Off" else f"<div class='nbh-status-box'><span class='nbh-status-icon'>{icon}</span><span class='nbh-status-label' style='color:{color};'>{label}</span>{t_info}</div>"
-                    html.append(f'<div class="nbh-cal-day {is_off}"><span class="nbh-day-num">{pd.to_datetime(r["Date"]).day}</span>{body}<div class="nbh-shift-footer">{r["In"]} - {r["Out"]}</div></div>')
+                    in_t, out_t = str(r["In"]).strip(), str(r["Out"]).strip()
+                    has_real_time = in_t not in ("00:00", "0", "nan", "") and out_t not in ("00:00", "0", "nan", "")
+                    footer = f"<div class='nbh-shift-footer'>{in_t} - {out_t}</div>" if has_real_time else ""
+                    html.append(f'<div class="nbh-cal-day {is_off}"><span class="nbh-day-num">{pd.to_datetime(r["Date"]).day}</span>{body}{footer}</div>')
                 st.markdown("".join(html) + "</div>", unsafe_allow_html=True)
