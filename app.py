@@ -67,6 +67,76 @@ st.markdown("""
 # --- 2. CORE HELPERS ---
 def make_hash(p): return hashlib.sha256(p.encode()).hexdigest()
 def get_db(): return sqlite3.connect('societies.db', check_same_thread=False)
+
+def _ensure_columns(cur, table, columns):
+    """Adds any columns that are missing from an EXISTING table. CREATE
+    TABLE IF NOT EXISTS only helps for brand-new databases — if the table
+    already exists (e.g. created by an older version of this app or the
+    separate init script), missing columns stay missing forever unless we
+    explicitly ALTER TABLE for them. columns is a list of
+    (name, sql_type, default_sql_literal) tuples."""
+    cur.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in cur.fetchall()}
+    for name, sql_type, default_literal in columns:
+        if name not in existing:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type} DEFAULT {default_literal}")
+
+def init_db():
+    """Creates the schema if it doesn't exist yet, upgrades any existing
+    tables that are missing newer columns, and seeds default admin + demo
+    manager accounts. Safe to call on every run (idempotent) — this means
+    app.py never depends on a separate init script being run first, or on
+    that script's schema staying in sync with this file."""
+    conn = get_db(); cur = conn.cursor()
+    cur.execute('''CREATE TABLE IF NOT EXISTS users (
+        email TEXT PRIMARY KEY, password TEXT, society_name TEXT,
+        holidays TEXT DEFAULT '', role TEXT DEFAULT 'manager')''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS rosters (
+        society_email TEXT, employee_name TEXT, category TEXT,
+        pay_type TEXT DEFAULT "Monthly", base_salary REAL DEFAULT 15000.0,
+        ot_rate REAL DEFAULT 100.0, late_penalty REAL DEFAULT 50.0,
+        absent_penalty REAL DEFAULT 500.0, half_day_rule REAL DEFAULT 0.5,
+        shift_start TEXT DEFAULT "09:00 AM", shift_end TEXT DEFAULT "06:00 PM",
+        shift_hours REAL DEFAULT 8.0, week_off TEXT DEFAULT "Sunday",
+        bonus REAL DEFAULT 0.0, remarks TEXT DEFAULT "",
+        PRIMARY KEY (society_email, employee_name))''')
+
+    # Migrate any pre-existing tables that predate the current schema.
+    _ensure_columns(cur, "users", [
+        ("holidays", "TEXT", "''"),
+        ("role", "TEXT", "'manager'"),
+    ])
+    _ensure_columns(cur, "rosters", [
+        ("category", "TEXT", "'General'"),
+        ("pay_type", "TEXT", "'Monthly'"),
+        ("base_salary", "REAL", "15000.0"),
+        ("ot_rate", "REAL", "100.0"),
+        ("late_penalty", "REAL", "50.0"),
+        ("absent_penalty", "REAL", "500.0"),
+        ("half_day_rule", "REAL", "0.5"),
+        ("shift_start", "TEXT", "'09:00 AM'"),
+        ("shift_end", "TEXT", "'06:00 PM'"),
+        ("shift_hours", "REAL", "8.0"),
+        ("week_off", "TEXT", "'Sunday'"),
+        ("bonus", "REAL", "0.0"),
+        ("remarks", "TEXT", "''"),
+    ])
+
+    # Seed default accounts if they don't exist yet.
+    cur.execute("INSERT OR IGNORE INTO users (email,password,society_name,holidays,role) VALUES (?,?,?,?,?)",
+                ('admin@nbh.com', make_hash('adminpassword'), 'NBH System Admin', '', 'super_admin'))
+    cur.execute("INSERT OR IGNORE INTO users (email,password,society_name,holidays,role) VALUES (?,?,?,?,?)",
+                ('manager@north.com', make_hash('pass123'), 'NBH North Residency', '', 'manager'))
+    # Self-heal: force the ROLE of these two known demo accounts back to
+    # correct on every startup, in case an older/corrupted database file has
+    # the wrong role stored for them. Passwords are NOT touched here, so any
+    # password you've since changed via Reset/Change Password is preserved.
+    cur.execute("UPDATE users SET role='super_admin' WHERE lower(email)='admin@nbh.com'")
+    cur.execute("UPDATE users SET role='manager' WHERE lower(email)='manager@north.com'")
+    conn.commit(); conn.close()
+
+init_db()
+
 def format_curr(v): return f"₹{v:,.2f}"
 def format_pretty_time(decimal_hours):
     if decimal_hours == 0: return ""
@@ -80,6 +150,52 @@ def time_to_decimal(t):
         p = str(t).split(':')
         return int(p[0]) + (int(p[1])/60.0)
     except: return 0.0
+
+def _coalesce(value, default):
+    """Returns default if value is None/NaN/empty-string, else value.
+    Needed because dict.get(key, default) only substitutes when the key is
+    MISSING — if the key exists but is explicitly NULL (common with stale
+    DB rows from an older schema), .get() still returns None."""
+    if value is None: return default
+    try:
+        if isinstance(value, float) and pd.isna(value): return default
+    except TypeError:
+        pass
+    if isinstance(value, str) and value.strip() == "": return default
+    return value
+
+def process_attendance(df_raw, u_email):
+    """Builds the per-day attendance rows for every employee in df_raw,
+    always reading the LATEST roster + holiday list from the DB so that
+    changes made in Holiday Planner / Employee Configuration are picked
+    up on every reprocess, without needing to re-upload the CSV."""
+    conn = get_db()
+    rost_dict = pd.read_sql(f"SELECT * FROM rosters WHERE society_email='{u_email}'", conn).set_index('employee_name').to_dict('index')
+    u_info = pd.read_sql(f"SELECT holidays FROM users WHERE email='{u_email}'", conn).iloc[0]
+    conn.close()
+    hols = [h.strip() for h in u_info['holidays'].split(",") if h.strip()]
+    date_cols = [col.split(' ')[0] for col in df_raw.columns if 'Duration' in col]
+    rows = []
+    for _, row in df_raw.iterrows():
+        name = row['Name']; raw_emp = rost_dict.get(name, {})
+        shift_hours = float(_coalesce(raw_emp.get('shift_hours'), 8.0))
+        week_off = str(_coalesce(raw_emp.get('week_off'), 'Sunday'))
+        shift_start = str(_coalesce(raw_emp.get('shift_start'), '09:00 AM'))
+        category = str(_coalesce(raw_emp.get('category'), 'General'))
+        for d in date_cols:
+            h_val = time_to_decimal(row.get(f"{d} Duration", 0)); in_t = str(row.get(f"{d} Check In", "00:00")); out_t = str(row.get(f"{d} Check Out", "00:00"))
+            dt = pd.to_datetime(d, dayfirst=True)
+            is_holiday = dt.strftime('%Y-%m-%d') in hols
+            is_off = (dt.strftime('%A').strip().lower() == week_off.strip().lower())
+            if is_holiday: s = "Holiday"
+            elif is_off: s = "Weekly Off"
+            elif h_val >= shift_hours: s = "Present"
+            elif h_val >= (shift_hours/2): s = "Half Day"
+            else: s = "Absent"
+            try: act = datetime.strptime(in_t, "%I:%M %p") if " " in in_t else datetime.strptime(in_t, "%H:%M"); tgt = datetime.strptime(shift_start, "%I:%M %p"); punc = "Late" if act > (tgt + timedelta(minutes=15)) else "On-Time"
+            except: punc = "On-Time"
+            rows.append({"Month": dt.strftime('%B %Y'), "Name": name, "Category": category, "Date": dt.strftime('%Y-%m-%d'), "Worked_Hrs": h_val, "OT_Hrs": max(0, h_val - shift_hours), "Status": s, "In": in_t, "Out": out_t, "Punctuality": punc})
+    return pd.DataFrame(rows), hols, date_cols
 
 # Report Engines
 def generate_master_excel(full_data, pay_df, month):
@@ -177,13 +293,24 @@ def generate_slip_pdf(soc, month, name, emp_info, pay, p_df):
 if 'auth' not in st.session_state: st.session_state.auth = {'logged_in': False}
 
 def login_logic(email, password, required_role):
-    conn = get_db(); user = pd.read_sql(f"SELECT * FROM users WHERE email='{email}'", conn); conn.close()
-    if not user.empty and user.iloc[0]['password'] == make_hash(password):
-        if user.iloc[0]['role'] == required_role:
-            st.session_state.auth = {'logged_in': True, 'user': email, 'name': user.iloc[0]['society_name'], 'role': user.iloc[0]['role']}
-            st.session_state.pop('processed_data', None); return True
-    st.error(f"❌ Access Denied for {required_role}")
-    return False
+    email = (email or "").strip().lower()
+    password = (password or "").strip()
+    if not email or not password:
+        st.error("Please enter both email and password."); return False
+    conn = get_db()
+    user = pd.read_sql("SELECT * FROM users WHERE lower(email)=?", conn, params=(email,))
+    conn.close()
+    if user.empty:
+        st.error(f"❌ No account found for '{email}'."); return False
+    if user.iloc[0]['password'] != make_hash(password):
+        st.error("❌ Incorrect password."); return False
+    if user.iloc[0]['role'] != required_role:
+        actual_role = "Society Manager" if user.iloc[0]['role'] == 'manager' else "System Admin"
+        st.error(f"❌ This account is a {actual_role} account — please use the '{actual_role}' tab instead.")
+        return False
+    st.session_state.auth = {'logged_in': True, 'user': user.iloc[0]['email'], 'name': user.iloc[0]['society_name'], 'role': user.iloc[0]['role']}
+    st.session_state.pop('processed_data', None)
+    return True
 
 # --- 4. UI FLOW ---
 if not st.session_state.auth['logged_in']:
@@ -199,6 +326,24 @@ if not st.session_state.auth['logged_in']:
             ae = st.text_input("Admin Email"); ap = st.text_input("Admin Password", type="password")
             if st.form_submit_button("Admin Login"):
                 if login_logic(ae, ap, 'super_admin'): st.rerun()
+
+    with st.expander("🔍 Not sure which tab to use? Check your account"):
+        st.caption("Admin and Manager are two separate accounts with different emails/passwords — this isn't the same login used on two tabs. Enter an email below to see exactly which one it is (no password needed).")
+        check_email = st.text_input("Email to check", key="check_email")
+        if st.button("Check this account"):
+            ce = (check_email or "").strip().lower()
+            if not ce:
+                st.warning("Enter an email first.")
+            else:
+                conn = get_db()
+                row = pd.read_sql("SELECT role, society_name FROM users WHERE lower(email)=?", conn, params=(ce,))
+                conn.close()
+                if row.empty:
+                    st.error(f"No account exists for '{ce}'. Create one from the Admin console, or check for typos.")
+                elif row.iloc[0]['role'] == 'super_admin':
+                    st.success(f"'{ce}' is a **System Admin** account. Use the 🔐 System Admin tab above.")
+                else:
+                    st.success(f"'{ce}' is a **Society Manager** account for '{row.iloc[0]['society_name']}'. Use the 🏠 Society Manager tab above.")
 else:
     u_email, u_name, u_role = st.session_state.auth['user'], st.session_state.auth['name'], st.session_state.auth['role']
     st.sidebar.title(f"👋 {u_name}")
@@ -214,6 +359,7 @@ else:
             with st.form("add_soc"):
                 st.subheader("➕ Register New Society"); n, e, p = st.text_input("Name"), st.text_input("Email"), st.text_input("Password")
                 if st.form_submit_button("Create Account"):
+                    n, e, p = n.strip(), e.strip().lower(), p.strip()
                     if not n or not e or not p:
                         st.error("Name, email, and password are all required.")
                     else:
@@ -302,17 +448,24 @@ else:
                 for n in m_data['Name'].unique():
                     if n not in rost.index: continue
                     e_df = m_data[m_data['Name'] == n]; r = rost.loc[n]
+                    pay_type = str(_coalesce(r['pay_type'], 'Monthly'))
+                    base_salary = float(_coalesce(r['base_salary'], 15000.0))
+                    ot_rate = float(_coalesce(r['ot_rate'], 100.0))
+                    late_penalty = float(_coalesce(r['late_penalty'], 50.0))
+                    absent_penalty = float(_coalesce(r['absent_penalty'], 500.0))
+                    half_day_rule = float(_coalesce(r['half_day_rule'], 0.5))
+                    bonus = float(_coalesce(r['bonus'], 0.0))
                     p, h, w, hl, l, ab = len(e_df[e_df['Status'] == 'Present']), len(e_df[e_df['Status'] == 'Half Day']), len(e_df[e_df['Status'] == 'Weekly Off']), len(e_df[e_df['Status'] == 'Holiday']), len(e_df[e_df['Punctuality'] == 'Late']), len(e_df[e_df['Status'] == 'Absent'])
-                    ot_hrs = round(e_df['OT_Hrs'].sum(), 2); ot_p = round(ot_hrs * r['ot_rate'], 2)
-                    late_fee = round(l * r['late_penalty'], 2); absent_fee = round(ab * r['absent_penalty'], 2); pens = late_fee + absent_fee
-                    if r['pay_type'] == "Monthly": base = round((r['base_salary'] / 30) * (p + w + hl + (h * r['half_day_rule'])), 2)
-                    else: base = round(r['base_salary'] * (p + (h * r['half_day_rule'])), 2)
+                    ot_hrs = round(e_df['OT_Hrs'].sum(), 2); ot_p = round(ot_hrs * ot_rate, 2)
+                    late_fee = round(l * late_penalty, 2); absent_fee = round(ab * absent_penalty, 2); pens = late_fee + absent_fee
+                    if pay_type == "Monthly": base = round((base_salary / 30) * (p + w + hl + (h * half_day_rule)), 2)
+                    else: base = round(base_salary * (p + (h * half_day_rule)), 2)
                     pay_rows.append({
-                        "Employee Name": n, "Salary Type": r['pay_type'],
+                        "Employee Name": n, "Salary Type": pay_type,
                         "Present": p, "Absent": ab, "Half Day": h, "Holiday": hl, "Weekly Off": w, "Late Days": l,
-                        "OT Hours": ot_hrs, "Base Earned": base, "OT Pay": ot_p, "Bonus": round(r['bonus'], 2),
+                        "OT Hours": ot_hrs, "Base Earned": base, "OT Pay": ot_p, "Bonus": round(bonus, 2),
                         "Late Fee Total": late_fee, "Absent Fee Total": absent_fee, "Total Fees": pens,
-                        "Final Net Payable": round(base + ot_p + r['bonus'] - pens, 2)
+                        "Final Net Payable": round(base + ot_p + bonus - pens, 2)
                     })
                 pay_df = pd.DataFrame(pay_rows); st.dataframe(pay_df, use_container_width=True)
                 col1, col2 = st.columns(2); col1.download_button("📥 Master Excel", generate_master_excel(m_data, pay_df, sel_m), f"Payroll_{sel_m}.xlsx")
@@ -331,29 +484,33 @@ else:
             f = st.file_uploader("uploader", type="csv", label_visibility="collapsed")
             if f:
                 df_raw = pd.read_csv(f); df_raw.columns = [str(c).strip().title() for c in df_raw.columns]
+                st.session_state.raw_csv = df_raw
                 conn = get_db()
                 for _, row in df_raw[['Name', 'Type']].drop_duplicates().iterrows():
                     if not conn.execute('SELECT 1 FROM rosters WHERE employee_name=? AND society_email=?', (row['Name'], u_email)).fetchone():
-                        conn.execute('INSERT INTO rosters (society_email, employee_name, category) VALUES (?,?,?)', (u_email, row['Name'], row['Type']))
+                        conn.execute('''INSERT INTO rosters
+                            (society_email, employee_name, category, pay_type, base_salary, ot_rate,
+                             late_penalty, absent_penalty, half_day_rule, shift_start, shift_end,
+                             shift_hours, week_off, bonus, remarks)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                            (u_email, row['Name'], row['Type'], 'Monthly', 15000.0, 100.0,
+                             50.0, 500.0, 0.5, '09:00 AM', '06:00 PM',
+                             8.0, 'Sunday', 0.0, ''))
                 conn.commit(); conn.close()
                 if st.button("🚀 Step 2: Process Attendance Data"):
-                    conn = get_db(); rost_dict = pd.read_sql(f"SELECT * FROM rosters WHERE society_email='{u_email}'", conn).set_index('employee_name').to_dict('index'); u_info = pd.read_sql(f"SELECT holidays FROM users WHERE email='{u_email}'", conn).iloc[0]; conn.close(); hols = [h.strip() for h in u_info['holidays'].split(",") if h.strip()]
-                    date_cols = [col.split(' ')[0] for col in df_raw.columns if 'Duration' in col]
-                    rows = []
-                    for _, row in df_raw.iterrows():
-                        name = row['Name']; emp = rost_dict.get(name, {'shift_hours': 8.0, 'week_off': 'Sunday', 'shift_start': '09:00 AM'})
-                        for d in date_cols:
-                            h_val = time_to_decimal(row.get(f"{d} Duration", 0)); in_t = str(row.get(f"{d} Check In", "00:00")); out_t = str(row.get(f"{d} Check Out", "00:00"))
-                            dt = pd.to_datetime(d); is_off = (dt.strftime('%A').strip().lower() == str(emp['week_off']).strip().lower())
-                            if is_off: s = "Weekly Off"
-                            elif d in hols: s = "Holiday"
-                            elif h_val >= emp['shift_hours']: s = "Present"
-                            elif h_val >= (emp['shift_hours']/2): s = "Half Day"
-                            else: s = "Absent"
-                            try: act = datetime.strptime(in_t, "%I:%M %p") if " " in in_t else datetime.strptime(in_t, "%H:%M"); tgt = datetime.strptime(emp.get('shift_start','09:00 AM'), "%I:%M %p"); punc = "Late" if act > (tgt + timedelta(minutes=15)) else "On-Time"
-                            except: punc = "On-Time"
-                            rows.append({"Month": dt.strftime('%B %Y'), "Name": name, "Category": emp.get('category','General'), "Date": d, "Worked_Hrs": h_val, "OT_Hrs": max(0, h_val - emp.get('shift_hours',8.0)), "Status": s, "In": in_t, "Out": out_t, "Punctuality": punc})
-                    st.session_state.processed_data = pd.DataFrame(rows)
+                    st.session_state.processed_data, last_hols, last_dates = process_attendance(df_raw, u_email)
+                    st.session_state.debug_hols = last_hols; st.session_state.debug_dates = last_dates
+
+            if 'raw_csv' in st.session_state:
+                bcol1, bcol2 = st.columns([1, 3])
+                if bcol1.button("🔄 Reprocess (pick up latest holidays / roster changes)"):
+                    st.session_state.processed_data, last_hols, last_dates = process_attendance(st.session_state.raw_csv, u_email)
+                    st.session_state.debug_hols = last_hols; st.session_state.debug_dates = last_dates
+                    st.success("Reprocessed with the latest saved holidays and roster settings.")
+                with st.expander("🔍 Debug: verify holiday matching"):
+                    st.write("**Holidays currently saved for this society:**", st.session_state.get('debug_hols', []))
+                    st.write("**Dates detected in the uploaded CSV (normalized):**", [pd.to_datetime(d, dayfirst=True).strftime('%Y-%m-%d') for d in st.session_state.get('debug_dates', [])])
+                    st.caption("If a date you marked as a holiday doesn't appear in both lists in the same format, that's why it isn't reflecting. Click Reprocess after saving new holidays.")
 
             if 'processed_data' in st.session_state:
                 data = st.session_state.processed_data
