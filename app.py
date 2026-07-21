@@ -21,7 +21,7 @@ st.markdown("""
 
     /* CALENDAR STYLING */
     .nbh-cal-container { display: grid; grid-template-columns: repeat(7, 1fr); width: 100%; border: 1px solid #ddd; background-color: #eee; gap: 1px; margin-top:20px;}
-    .nbh-cal-header { background-color: #5D5FEF !important; text-align: center; padding: 12px; font-weight: 800; color: white !important; font-size: 14px; text-transform: uppercase; border: 1px solid #4a4cd1; }
+    .nbh-cal-header { background-color: #5D5FEF !important; text-align: center; padding: 15px; font-weight: 800; color: white !important; font-size: 14px; text-transform: uppercase; border: 1px solid #4a4cd1; }
     .nbh-cal-day { min-height: 165px; background-color: white; padding: 10px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; position: relative; border-right: 1px solid #ddd; border-bottom: 1px solid #ddd;}
     .nbh-weekly-off { background: repeating-linear-gradient(45deg, #ffffff, #ffffff 10px, #f9f9f9 10px, #f9f9f9 20px) !important; }
     .nbh-day-num-row { display: flex; align-items: baseline; gap: 6px; align-self: flex-start; margin-bottom: 5px; }
@@ -31,7 +31,6 @@ st.markdown("""
     .nbh-status-label { font-size: 10px; font-weight: 900; text-transform: uppercase; margin-top: 4px; }
     .nbh-time-text { font-size: 11px; font-weight: 800; color: #1B2132; margin-top: 4px; background-color: #f0f1fd; padding: 2px 8px; border-radius: 10px; border: 1px solid #d1d4f9; }
     .nbh-shift-footer { margin-top: auto; padding-top: 4px; border-top: 1px solid #f0f0f0; font-size: 10px; color: #666; font-weight: 600; text-align: center; width: 100%; }
-    .nbh-manpower-tag { font-size: 9px; color: #5D5FEF; font-weight: 800; margin-top: 2px; text-transform: uppercase; background: #eeefff; padding: 1px 5px; border-radius: 4px; }
 
     /* CARDS STYLING */
     .manpower-card { background-color: #ffffff; padding: 15px; border-radius: 12px; border: 1px solid #e0e0e0; border-left: 6px solid #5D5FEF; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center;}
@@ -39,15 +38,7 @@ st.markdown("""
     .manpower-value { font-size: 18px; font-weight: 700; color: #1B2132; }
 
     /* ADMIN DASHBOARD HEADER STYLE */
-    .card-title-header {
-        font-size: 18px;
-        font-weight: 700;
-        color: #1B2132;
-        margin-bottom: 15px;
-        border-bottom: 3px solid #5D5FEF;
-        padding-bottom: 10px;
-        display: block;
-    }
+    .card-title-header { font-size: 18px; font-weight: 700; color: #1B2132; margin-bottom: 15px; border-bottom: 3px solid #5D5FEF; padding-bottom: 10px; display: block; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -67,7 +58,7 @@ def time_to_decimal(t):
         return float(t)
     except: return 0.0
 
-# --- SMART ENGINE ---
+# --- SMART ENGINE (UNCHANGED) ---
 _METRIC_PATTERNS = [(re.compile(r'check[\s\-_]*in', re.I), 'Check In'), (re.compile(r'check[\s\-_]*out', re.I), 'Check Out'), (re.compile(r'duration', re.I), 'Duration')]
 _ISO_DATE_RE = re.compile(r'^(\d{4})-(\d{1,2})-(\d{1,2})$')
 
@@ -150,7 +141,7 @@ def process_attendance(df_raw, u_email):
             final_rows.append({"Month": sample_date.strftime('%B %Y'), "Name": name, "Category": emp.get('category') or row['Type'], "Date": d_iso, "Worked_Hrs": h_val, "Status": status, "In": in_t, "Out": out_t})
     return pd.DataFrame(final_rows)
 
-# --- 5. UI FLOW ---
+# --- 5. AUTH & UI FLOW ---
 if 'auth' not in st.session_state: st.session_state.auth = {'logged_in': False}
 
 if not st.session_state.auth['logged_in']:
@@ -179,29 +170,20 @@ else:
     st.sidebar.title(f"👋 {u_name}")
     if st.sidebar.button("Logout"): st.session_state.auth = {'logged_in': False}; st.rerun()
 
-    # --- SUPER ADMIN DASHBOARD REDESIGNED ---
     if u_role == 'super_admin':
         st.header("🔑 Master Admin Console")
         conn = get_db()
         socs = pd.read_sql("SELECT society_name as Society, email as Account FROM users WHERE role='manager'", conn)
-        st.subheader("📋 Registered Societies")
-        st.dataframe(socs, use_container_width=True)
-        st.divider()
-
-        # Three Equal-Width Cards
+        st.subheader("📋 Registered Societies"); st.dataframe(socs, use_container_width=True); st.divider()
         col1, col2, col3 = st.columns(3)
         with col1:
             with st.container(border=True):
                 st.markdown('<div class="card-title-header">➕ Register New Society</div>', unsafe_allow_html=True)
                 with st.form("reg", clear_on_submit=True):
-                    n = st.text_input("Name")
-                    e = st.text_input("Email")
-                    p = st.text_input("Password", type="password")
-                    if st.form_submit_button("Create Account", use_container_width=True):
-                        if n and e and p:
-                            conn.execute("INSERT OR REPLACE INTO users (email,password,society_name,holidays,role) VALUES (?,?,?,?,?)", (e, make_hash(p), n, '', 'manager'))
-                            conn.commit(); st.success("Created!"); st.rerun()
-                        else: st.error("All fields required.")
+                    n, e, p = st.text_input("Name"), st.text_input("Email"), st.text_input("Pass", type="password")
+                    if st.form_submit_button("Create Account"):
+                        conn.execute("INSERT OR REPLACE INTO users (email,password,society_name,holidays,role) VALUES (?,?,?,?,?)", (e, make_hash(p), n, '', 'manager'))
+                        conn.commit(); st.success("Created!"); st.rerun()
         with col2:
             with st.container(border=True):
                 st.markdown('<div class="card-title-header">🔄 Reset Society Password</div>', unsafe_allow_html=True)
@@ -209,7 +191,7 @@ else:
                     target = st.selectbox("Select Society", socs['Account'].tolist())
                     np = st.text_input("New Password", type="password")
                     cp = st.text_input("Confirm Password", type="password")
-                    if st.form_submit_button("Reset Password", use_container_width=True):
+                    if st.form_submit_button("Reset Password"):
                         if np == cp and np:
                             conn.execute("UPDATE users SET password=? WHERE email=?", (make_hash(np), target))
                             conn.commit(); st.success("Updated!")
@@ -220,28 +202,14 @@ else:
                 with st.form("del"):
                     target_del = st.selectbox("Select Account", ["Select..."] + socs['Account'].tolist())
                     conf = st.checkbox("I confirm permanent deletion")
-                    if st.form_submit_button("Remove Permanently", use_container_width=True):
+                    if st.form_submit_button("Remove Permanently"):
                         if conf and target_del != "Select...":
                             conn.execute("DELETE FROM users WHERE email=?", (target_del,))
                             conn.execute("DELETE FROM rosters WHERE society_email=?", (target_del,))
                             conn.commit(); st.success("Removed!"); st.rerun()
-                        else: st.warning("Please confirm deletion.")
-        
-        st.divider()
-        with st.expander("🔐 Change My Own Admin Password"):
-            with st.form("admin_self"):
-                old = st.text_input("Current Password", type="password")
-                new = st.text_input("New Password", type="password")
-                if st.form_submit_button("Update Admin Password"):
-                    row = pd.read_sql(f"SELECT password FROM users WHERE email='{u_email}'", conn).iloc[0]
-                    if make_hash(old) == row['password']:
-                        conn.execute("UPDATE users SET password=? WHERE email=?", (make_hash(new), u_email))
-                        conn.commit(); st.success("Password Updated!")
-                    else: st.error("Current password incorrect.")
         conn.close()
-
     else:
-        # --- MANAGER DASHBOARD (UNCHANGED) ---
+        # --- MANAGER DASHBOARD ---
         page = st.sidebar.radio("Navigate", ["🚀 Dashboard", "💰 Payroll Hub", "👥 Roster", "📅 Holiday Planner"])
         if page == "🚀 Dashboard":
             st.header(f"👋 Attendance Dashboard")
@@ -271,6 +239,7 @@ else:
                 st.subheader("📊 Society Summary Table"); st.dataframe(filtered.groupby(['Name', 'Category', 'Status']).size().unstack(fill_value=0).reset_index(), use_container_width=True)
                 st.divider(); sel_n = st.selectbox("Individual Spotlight", filtered['Name'].unique())
                 p_df = filtered[filtered['Name'] == sel_n].sort_values('Date')
+                
                 html = ["<div class='nbh-cal-container'>"]
                 for d_name in ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]: html.append(f"<div class='nbh-cal-header'>{d_name}</div>")
                 f_dt = pd.to_datetime(p_df['Date'].iloc[0]); padding = (f_dt.weekday() + 1) % 7 
@@ -285,7 +254,7 @@ else:
         
         elif page == "💰 Payroll Hub":
             if 'processed_data' in st.session_state:
-                data = st.session_state.processed_data; sel_m = st.selectbox("Month", data['Month'].unique())
+                data = st.session_state.processed_data; sel_m = st.selectbox("Select Month", data['Month'].unique())
                 m_data = data[data['Month'] == sel_m]; conn = get_db(); rost_df = pd.read_sql(f"SELECT * FROM rosters WHERE society_email='{u_email}'", conn); conn.close()
                 pay_rows = []
                 dim = calendar.monthrange(pd.to_datetime(m_data['Date'].iloc[0]).year, pd.to_datetime(m_data['Date'].iloc[0]).month)[1]
@@ -299,7 +268,7 @@ else:
                     elif r['pay_type'] == "Daily": base = round(base_val*(p+(h*0.5)),2)
                     else: base = round(base_val*w_df['Worked_Hrs'].sum(),2)
                     pay_rows.append({"Name": n, "p": p, "h": h, "ab": ab, "w": w, "hol": hol, "base": base, "net": round(base - (ab*r['absent_penalty']), 2), "ot_pay": 0, "fine": ab*r['absent_penalty']})
-                st.subheader("📋 Master Payroll Summary"); st.dataframe(pd.DataFrame(pay_rows)[["Name", "p", "ab", "net"]].rename(columns={"p":"P","ab":"A","net":"Total"}), use_container_width=True)
+                st.subheader("📋 Master Payroll Summary"); st.dataframe(pd.DataFrame(pay_rows)[["Name", "p", "ab", "net"]].rename(columns={"p":"Present","ab":"Absent","net":"Total"}), use_container_width=True)
                 sel_w = st.selectbox("Individual Slip", [x['Name'] for x in pay_rows])
                 stats = next(x for x in pay_rows if x['Name'] == sel_w)
                 emp_info = rost_df[rost_df['employee_name']==sel_w].iloc[0]
@@ -316,9 +285,11 @@ else:
                 conn.commit(); conn.close(); st.success("Updated!")
         
         elif page == "📅 Holiday Planner":
+            st.header("Holiday Planner")
             conn = get_db(); u_info = pd.read_sql(f"SELECT holidays FROM users WHERE email='{u_email}'", conn).iloc[0]; conn.close()
             saved = [h.strip() for h in u_info['holidays'].split(",") if h.strip()]
-            y = st.selectbox("Year", [2024, 2025, 2026]); m_idx = list(calendar.month_name).index(st.selectbox("Month", list(calendar.month_name)[1:]))
+            y = st.selectbox("Year", [2024, 2025, 2026, 2027])
+            m_idx = list(calendar.month_name).index(st.selectbox("Month", list(calendar.month_name)[1:]))
             cal = calendar.monthcalendar(y, m_idx); new_hols = []
             header_cols = st.columns(7)
             for i, wd_name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
